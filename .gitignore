@@ -1,0 +1,23 @@
+# Node.js
+node_modules/
+npm-debug.log
+yarn-debug.log*
+yarn-error.log*
+
+# Environment variables
+.env
+
+# Logs
+logs
+*.log
+log.*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# SQLite database (optional, if you want to keep it local)
+*.db
+
+# Vercel or Railway config (optional)
+.vercel/

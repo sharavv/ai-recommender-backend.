@@ -6,7 +6,7 @@ import cors from "cors";
 import https from "https";
 import { initDb } from "./db.js";
 
-dotenv.config(); // load .env file
+dotenv.config(); // Load environment variables
 
 // ✅ ENV CHECK
 console.log("🧠 ENV CHECK:");
@@ -18,13 +18,11 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// OpenAI setup
+// Initialize OpenAI + SQLite
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-// Initialize SQLite DB
 let dbPromise = initDb();
 
-// Spotify token caching
+// 🎵 Spotify Token Cache
 let spotifyToken = null;
 let spotifyTokenExpiresAt = 0;
 
@@ -47,14 +45,13 @@ async function getSpotifyToken() {
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
       Authorization:
-        "Basic " + Buffer.from(clientId + ":" + clientSecret).toString("base64"),
+        "Basic " + Buffer.from(`${clientId}:${clientSecret}`).toString("base64"),
     },
     data: "grant_type=client_credentials",
   });
 
   spotifyToken = tokenResp.data.access_token;
-  const expiresIn = tokenResp.data.expires_in || 3600;
-  spotifyTokenExpiresAt = Date.now() + expiresIn * 1000;
+  spotifyTokenExpiresAt = Date.now() + (tokenResp.data.expires_in || 3600) * 1000;
   return spotifyToken;
 }
 
@@ -73,11 +70,9 @@ Respond ONLY as a JSON object, e.g. {"type":"movie","keywords":["mystery","thril
   });
 
   const txt = resp.choices?.[0]?.message?.content?.trim();
-
   try {
     return JSON.parse(txt);
   } catch {
-    // fallback if OpenAI returns invalid JSON
     return { type: "movie", keywords: [userInput] };
   }
 }
@@ -124,68 +119,33 @@ app.post("/recommend", async (req, res) => {
 
     // 🎵 SONGS (Spotify)
     if (type === "song") {
-      try {
-        console.log("🎵 Fetching Spotify token...");
-        const token = await getSpotifyToken();
-        console.log("✅ Spotify token received:", token.slice(0, 10) + "...");
-
-        const safeQuery = encodeURIComponent(keywords.split(" ").slice(0, 4).join(" "));
-        console.log("🔍 Searching Spotify for:", safeQuery);
-
-        let spResp;
-        try {
-          spResp = await axios.get(
-            `https://api.spotify.com/v1/search?q=${safeQuery}&type=track&limit=8`,
-            {
-              headers: { Authorization: `Bearer ${token}` },
-              timeout: 10000,
-            }
-          );
-        } catch (err) {
-          if (err.code === "ECONNRESET") {
-            console.warn("⚠️ Spotify connection reset — retrying once...");
-            await new Promise((r) => setTimeout(r, 2000)); // wait 2s and retry once
-            spResp = await axios.get(
-              `https://api.spotify.com/v1/search?q=${safeQuery}&type=track&limit=8`,
-              {
-                headers: { Authorization: `Bearer ${token}` },
-                timeout: 10000,
-              }
-            );
-          } else {
-            throw err;
-          }
+      const token = await getSpotifyToken();
+      const safeQuery = encodeURIComponent(keywords.split(" ").slice(0, 4).join(" "));
+      const spResp = await axios.get(
+        `https://api.spotify.com/v1/search?q=${safeQuery}&type=track&limit=8`,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+          timeout: 10000,
         }
-
-        const tracks = spResp.data?.tracks?.items || [];
-        recommendations = tracks.map((t) => ({
-          id: t.id,
-          title: t.name,
-          artists: t.artists.map((a) => a.name).join(", "),
-          preview_url: t.preview_url,
-          album_image: t.album.images?.[0]?.url || null,
-          external_url: t.external_urls?.spotify || null,
-        }));
-
-        console.log(`✅ Found ${tracks.length} Spotify tracks.`);
-      } catch (e) {
-        console.error("❌ Spotify search error:", e?.response?.data || e.message || e);
-      }
+      );
+      const tracks = spResp.data?.tracks?.items || [];
+      recommendations = tracks.map((t) => ({
+        id: t.id,
+        title: t.name,
+        artists: t.artists.map((a) => a.name).join(", "),
+        preview_url: t.preview_url,
+        album_image: t.album.images?.[0]?.url || null,
+        external_url: t.external_urls?.spotify || null,
+      }));
     }
 
     // 🎬 MOVIES / TV SHOWS (TMDB)
     else {
       const safeKeywords = keywords.split(" ").slice(0, 4).join(" ");
-      let tmdbUrl;
-      if (type === "tv") {
-        tmdbUrl = `https://api.themoviedb.org/3/search/tv?api_key=${tmdbApiKey}&query=${encodeURIComponent(
-          safeKeywords
-        )}&language=en-US&page=1`;
-      } else {
-        tmdbUrl = `https://api.themoviedb.org/3/search/movie?api_key=${tmdbApiKey}&query=${encodeURIComponent(
-          safeKeywords
-        )}&language=en-US&page=1`;
-      }
+      const tmdbUrl =
+        type === "tv"
+          ? `https://api.themoviedb.org/3/search/tv?api_key=${tmdbApiKey}&query=${encodeURIComponent(safeKeywords)}&language=en-US&page=1`
+          : `https://api.themoviedb.org/3/search/movie?api_key=${tmdbApiKey}&query=${encodeURIComponent(safeKeywords)}&language=en-US&page=1`;
 
       const tmdbResp = await safeGet(tmdbUrl);
       const results = tmdbResp.data?.results || [];
@@ -207,20 +167,12 @@ app.post("/recommend", async (req, res) => {
       [type, userInput, null, null, null]
     );
 
-    const historyId = ins.lastID;
-    res.json({ type, keywords, recommendations, history_id: historyId });
+    res.json({ type, keywords, recommendations, history_id: ins.lastID });
   } catch (err) {
-    console.error("🚨 Error /recommend full log:");
-    console.error("Message:", err.message);
-    if (err.response) {
-      console.error("Response Data:", err.response.data);
-      console.error("Response Status:", err.response.status);
-    }
-    if (err.stack) console.error("Stack Trace:", err.stack);
+    console.error("🚨 Error /recommend:", err);
     res.status(500).json({
       error: "Internal server error",
       details: err.message,
-      hint: "Check console for full error log",
     });
   }
 });
@@ -229,7 +181,6 @@ app.post("/recommend", async (req, res) => {
 app.post("/feedback", async (req, res) => {
   try {
     const { history_id, feedback, picked_id, picked_title, picked_medium } = req.body;
-
     if (!history_id || !feedback) {
       return res.status(400).json({ error: "history_id and feedback required" });
     }
@@ -240,7 +191,6 @@ app.post("/feedback", async (req, res) => {
       feedback,
     ]);
 
-    // Update history record if user picked an item
     if (picked_id || picked_title) {
       await db.run(
         "UPDATE history SET picked_title = ?, picked_id = ?, picked_medium = ? WHERE id = ?",
@@ -269,8 +219,6 @@ app.get("/history", async (req, res) => {
   }
 });
 
-// 🚀 Start server
+// ✅ Single app.listen
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`✅ Server running on http://localhost:${PORT}`);
-});
+app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
