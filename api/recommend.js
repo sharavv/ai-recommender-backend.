@@ -1,111 +1,125 @@
 // === /api/recommend.js ===
-import fetch from "node-fetch";
+import axios from "axios";
+import OpenAI from "openai";
 
 export default async function handler(req, res) {
+  // ✅ Allow CORS
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const { input, type } = req.body;
-  console.log(`🎯 Request received: type=${type}, query=${input}`);
-
-  if (!input) {
-    return res.status(400).json({ error: "Missing input" });
-  }
-
   try {
+    const { input } = req.body;
+    if (!input) return res.status(400).json({ error: "Missing input" });
+
+    console.log(`🎯 Input received: ${input}`);
+
+    // ✅ Step 1: Interpret user intent (movie, tv, or song)
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const interpretPrompt = `
+      The user said: "${input}".
+      Determine if they want recommendations for movies, TV shows, or songs.
+      Then output only JSON like this:
+      {"type": "movie"|"tv"|"song", "query": "<refined search keywords>"}
+    `;
+
+    const aiResp = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: interpretPrompt }],
+    });
+
+    let interpretation;
+    try {
+      interpretation = JSON.parse(aiResp.choices[0].message.content.trim());
+    } catch (err) {
+      console.warn("⚠️ Could not parse AI response, using fallback.");
+      interpretation = { type: "movie", query: input };
+    }
+
+    console.log("🧠 AI Interpretation:", interpretation);
+    const { type, query } = interpretation;
+
     let recommendations = [];
 
-    // ==========================
-    // 🎬 MOVIES
-    // ==========================
-    if (type === "movie") {
-      const tmdbUrl = `https://api.themoviedb.org/3/search/movie?api_key=${process.env.TMDB_API_KEY}&query=${encodeURIComponent(
-        input
-      )}`;
-      const movieResp = await fetch(tmdbUrl);
-      const movieData = await movieResp.json();
+    // ================================
+    // 🎬 MOVIES & TV SHOWS via TMDB
+    // ================================
+    if (type === "movie" || type === "tv") {
+      const tmdbUrl = `https://api.themoviedb.org/3/search/${type}?api_key=${
+        process.env.TMDB_API_KEY
+      }&query=${encodeURIComponent(query)}`;
 
-      recommendations = movieData.results
-        ?.slice(0, 10)
-        .map((m) => ({
-          title: m.title,
-          release_date: m.release_date,
-          poster_path: m.poster_path,
-        })) || [];
+      const tmdbResp = await axios.get(tmdbUrl);
+      const results = tmdbResp.data.results || [];
+
+      recommendations = results.slice(0, 8).map((item) => ({
+        id: item.id,
+        title: item.title || item.name,
+        overview: item.overview || "",
+        poster: item.poster_path
+          ? `https://image.tmdb.org/t/p/w500${item.poster_path}`
+          : null,
+        release_date: item.release_date || item.first_air_date || "N/A",
+        rating: item.vote_average || null,
+      }));
     }
 
-    // ==========================
-    // 📺 TV SHOWS
-    // ==========================
-    else if (type === "tv") {
-      const tmdbUrl = `https://api.themoviedb.org/3/search/tv?api_key=${process.env.TMDB_API_KEY}&query=${encodeURIComponent(
-        input
-      )}`;
-      const tvResp = await fetch(tmdbUrl);
-      const tvData = await tvResp.json();
-
-      recommendations = tvData.results
-        ?.slice(0, 10)
-        .map((t) => ({
-          name: t.name,
-          first_air_date: t.first_air_date,
-          poster_path: t.poster_path,
-        })) || [];
-    }
-
-    // ==========================
-    // 🎵 SONGS
-    // ==========================
+    // ================================
+    // 🎵 SONGS via Spotify
+    // ================================
     else if (type === "song") {
-      // Get Spotify Access Token
-      const tokenResp = await fetch("https://accounts.spotify.com/api/token", {
-        method: "POST",
-        headers: {
-          Authorization:
-            "Basic " +
-            Buffer.from(
+      // Get Spotify access token
+      const tokenResp = await axios.post(
+        "https://accounts.spotify.com/api/token",
+        new URLSearchParams({ grant_type: "client_credentials" }),
+        {
+          headers: {
+            Authorization: `Basic ${Buffer.from(
               `${process.env.SPOTIFY_CLIENT_ID}:${process.env.SPOTIFY_CLIENT_SECRET}`
-            ).toString("base64"),
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-        body: "grant_type=client_credentials",
-      });
+            ).toString("base64")}`,
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+        }
+      );
 
-      const tokenData = await tokenResp.json();
-      const accessToken = tokenData.access_token;
+      const token = tokenResp.data.access_token;
+      const spotifyResp = await axios.get(
+        `https://api.spotify.com/v1/search?q=${encodeURIComponent(
+          query
+        )}&type=track&limit=8`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
 
-      // Search songs on Spotify
-      const spotifyUrl = `https://api.spotify.com/v1/search?q=${encodeURIComponent(
-        input
-      )}&type=track&limit=10`;
-      const spotifyResp = await fetch(spotifyUrl, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      });
-      const spotifyData = await spotifyResp.json();
-
-      recommendations =
-        spotifyData.tracks?.items.map((track) => ({
-          title: track.name,
-          artists: track.artists.map((a) => a.name).join(", "),
-          album_image: track.album.images[0]?.url,
-        })) || [];
+      const tracks = spotifyResp.data.tracks.items || [];
+      recommendations = tracks.map((t) => ({
+        id: t.id,
+        title: t.name,
+        artist: t.artists.map((a) => a.name).join(", "),
+        album: t.album.name,
+        image: t.album.images?.[0]?.url || null,
+        spotify_url: t.external_urls.spotify,
+      }));
     }
 
-    // ==========================
-    // ❓ DEFAULT
-    // ==========================
-    else {
-      return res.status(400).json({ error: "Invalid type provided" });
+    // ================================
+    // ✅ Response
+    // ================================
+    if (recommendations.length === 0) {
+      return res.status(200).json({ message: "No results found" });
     }
 
-    // ==========================
-    // ✅ Send results
-    // ==========================
-    console.log(`✅ ${recommendations.length} ${type}s found.`);
-    return res.status(200).json({ recommendations });
+    console.log(`✅ ${recommendations.length} ${type}s found`);
+    return res.status(200).json({ type, query, recommendations });
   } catch (err) {
-    console.error("❌ Error fetching recommendations:", err);
-    return res.status(500).json({ error: "Internal Server Error" });
+    console.error("🔥 Error in /api/recommend:", err);
+    res.status(500).json({
+      error: "Internal server error",
+      details: err.message,
+    });
   }
 }
