@@ -2,7 +2,7 @@ import axios from "axios";
 import OpenAI from "openai";
 
 export default async function handler(req, res) {
-  // ✅ CORS setup
+  // ✅ Allow CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -18,12 +18,17 @@ export default async function handler(req, res) {
 
     console.log("🎯 Input received:", input);
 
-    // ✅ 1️⃣ Interpret user intent via OpenAI
+    // 1️⃣ Use OpenAI to classify input type & determine intent
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const interpretPrompt = `
-      The user said: "${input}".
-      Classify if this is about movies, TV shows, or music.
-      Respond in JSON: {"type": "movie"|"tv"|"song", "query": "<keywords>"}
+    The user said: "${input}".
+    Determine:
+    - type: "movie", "tv", or "song"
+    - mode: "genre" if they mentioned a genre/mood (like thriller, romance, horror)
+            "title" if they mentioned a specific show or movie name
+    - query: cleaned-up keyword(s) to use in API search
+    Respond in strict JSON like this:
+    {"type":"movie","mode":"genre","query":"thriller"}
     `;
 
     const interpretationResp = await openai.chat.completions.create({
@@ -31,36 +36,59 @@ export default async function handler(req, res) {
       messages: [{ role: "user", content: interpretPrompt }],
     });
 
-    const interpretationText =
-      interpretationResp.choices[0].message.content.trim();
-    console.log("🧠 Interpretation:", interpretationText);
+    const text = interpretationResp.choices[0].message.content.trim();
+    console.log("🧠 Interpretation:", text);
 
     let interpretation;
     try {
-      interpretation = JSON.parse(interpretationText);
+      interpretation = JSON.parse(text);
     } catch {
-      interpretation = { type: "movie", query: input };
+      interpretation = { type: "movie", mode: "title", query: input };
     }
 
-    // fallback just in case
-    if (!["movie", "tv", "song"].includes(interpretation.type)) {
+    if (!["movie", "tv", "song"].includes(interpretation.type))
       interpretation.type = "movie";
-    }
+    if (!["genre", "title"].includes(interpretation.mode))
+      interpretation.mode = "title";
 
     let recommendations = [];
 
-    // ✅ 2️⃣ TMDB (Movies or TV)
+    // 2️⃣ TMDB Movies / TV
     if (interpretation.type === "movie" || interpretation.type === "tv") {
-      const tmdbUrl = `https://api.themoviedb.org/3/search/${interpretation.type}?api_key=${process.env.TMDB_API_KEY}&query=${encodeURIComponent(
-        interpretation.query
-      )}`;
+      const TMDB_KEY = process.env.TMDB_API_KEY;
+      let tmdbUrl = "";
+
+      if (interpretation.mode === "genre") {
+        // Get genre list first
+        const genreResp = await axios.get(
+          `https://api.themoviedb.org/3/genre/${interpretation.type}/list?api_key=${TMDB_KEY}&language=en-US`
+        );
+
+        const genres = genreResp.data.genres || [];
+        const match = genres.find((g) =>
+          g.name.toLowerCase().includes(interpretation.query.toLowerCase())
+        );
+
+        if (match) {
+          tmdbUrl = `https://api.themoviedb.org/3/discover/${interpretation.type}?api_key=${TMDB_KEY}&with_genres=${match.id}&sort_by=popularity.desc`;
+        } else {
+          // fallback to text search if genre not matched
+          tmdbUrl = `https://api.themoviedb.org/3/search/${interpretation.type}?api_key=${TMDB_KEY}&query=${encodeURIComponent(
+            interpretation.query
+          )}`;
+        }
+      } else {
+        tmdbUrl = `https://api.themoviedb.org/3/search/${interpretation.type}?api_key=${TMDB_KEY}&query=${encodeURIComponent(
+          interpretation.query
+        )}`;
+      }
+
       console.log("🎬 TMDB URL:", tmdbUrl);
 
       try {
         const tmdbResp = await axios.get(tmdbUrl);
-        console.log("✅ TMDB Response:", tmdbResp.data);
-
         const results = tmdbResp.data?.results || [];
+
         recommendations = results.slice(0, 8).map((r) => ({
           id: r.id,
           title: r.title || r.name,
@@ -76,10 +104,9 @@ export default async function handler(req, res) {
       }
     }
 
-    // ✅ 3️⃣ Spotify (Songs)
+    // 3️⃣ Spotify Songs
     else if (interpretation.type === "song") {
       try {
-        // Get Spotify token
         const spotifyTokenResp = await axios.post(
           "https://accounts.spotify.com/api/token",
           new URLSearchParams({ grant_type: "client_credentials" }),
@@ -93,12 +120,12 @@ export default async function handler(req, res) {
           }
         );
 
-        const spotifyToken = spotifyTokenResp.data.access_token;
+        const token = spotifyTokenResp.data.access_token;
         const spotifyResp = await axios.get(
           `https://api.spotify.com/v1/search?q=${encodeURIComponent(
             interpretation.query
           )}&type=track&limit=8`,
-          { headers: { Authorization: `Bearer ${spotifyToken}` } }
+          { headers: { Authorization: `Bearer ${token}` } }
         );
 
         const results = spotifyResp.data?.tracks?.items || [];
@@ -117,9 +144,8 @@ export default async function handler(req, res) {
     }
 
     console.log("✅ Final Recommendations:", recommendations);
-    if (recommendations.length === 0) {
+    if (!recommendations.length)
       return res.status(200).json({ message: "No results found" });
-    }
 
     return res.status(200).json({ recommendations });
   } catch (err) {
