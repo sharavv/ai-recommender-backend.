@@ -1,8 +1,3 @@
-<<<<<<< HEAD
-export default function handler(req, res) {
-  res.status(200).json({ message: "API detected!" });
-}
-=======
 import OpenAI from "openai";
 import fetch from "node-fetch";
 
@@ -68,4 +63,3 @@ export default async function handler(req, res) {
     res.status(500).json({ error: err.message });
   }
 }
->>>>>>> 84256c070e1be5b8f63044d948f57d1134b65780
