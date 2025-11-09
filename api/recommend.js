@@ -6,6 +6,14 @@ const openai = new OpenAI({
 });
 
 export default async function handler(req, res) {
+  // ✅ Allow CORS from anywhere (for now)
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  // ✅ Handle preflight request
+  if (req.method === "OPTIONS") return res.status(200).end();
+
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Only POST allowed" });
   }
@@ -13,7 +21,7 @@ export default async function handler(req, res) {
   try {
     const { mood, genre, activity } = req.body;
 
-    // ✅ Load all three keys
+    // ✅ Check all API keys
     const openaiKey = process.env.OPENAI_API_KEY;
     const spotifyKey = process.env.SPOTIFY_API_KEY;
     const youtubeKey = process.env.YOUTUBE_API_KEY;
@@ -22,7 +30,7 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "Missing one or more API keys" });
     }
 
-    // 1️⃣ Use OpenAI for mood-based recommendations
+    // 🧠 Use OpenAI for mood-based recommendations
     const aiResponse = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
@@ -36,7 +44,7 @@ export default async function handler(req, res) {
 
     const recommendations = aiResponse.choices[0].message.content;
 
-    // 2️⃣ Optional Spotify Example
+    // 🎵 Optional Spotify Example
     const spotifyData = await fetch(
       `https://api.spotify.com/v1/search?q=${encodeURIComponent(
         mood
@@ -44,7 +52,7 @@ export default async function handler(req, res) {
       { headers: { Authorization: `Bearer ${spotifyKey}` } }
     ).then((r) => r.json());
 
-    // 3️⃣ Optional YouTube Example
+    // 📺 Optional YouTube Example
     const youtubeData = await fetch(
       `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(
         mood + " music"
